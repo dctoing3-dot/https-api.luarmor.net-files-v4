@@ -1,13 +1,10 @@
 // ============================================
 // 🔺 ULTIMATE HUB - VERCEL SERVERLESS v4.0
 // ============================================
-// - Serverless functions
-// - In-memory storage (reset on cold start)
-// - No persistent database
-// - Ultra-fast cold start (~5s)
+// Pure serverless - NO EXPRESS
 // ============================================
 
-const axios = require('axios');
+const https = require('https');
 const crypto = require('crypto');
 
 // ============================================
@@ -28,7 +25,6 @@ const CONFIG = {
     VERSION: "4.0-VERCEL"
 };
 
-// Secret (generated once per deployment)
 const MASTER_SECRET = process.env.MASTER_SECRET || crypto.randomBytes(64).toString('hex');
 
 // ============================================
@@ -57,22 +53,18 @@ const NOT_AUTHORIZED_HTML = `<!DOCTYPE html>
             z-index: 1;
         }
         .container {
-            position: relative; z-index: 10;
-            height: 100vh;
+            position: relative; z-index: 10; height: 100vh;
             display: flex; flex-direction: column;
             justify-content: center; align-items: center;
-            text-align: center; padding: 20px;
-            user-select: none;
+            text-align: center; padding: 20px; user-select: none;
         }
         .auth-label {
             display: flex; align-items: center; gap: 12px;
             color: #ffffff; font-size: 1.1rem; font-weight: 600;
-            letter-spacing: 3px; text-transform: uppercase;
-            margin-bottom: 25px;
+            letter-spacing: 3px; text-transform: uppercase; margin-bottom: 25px;
         }
         h1 {
-            color: #ffffff;
-            font-size: clamp(1.8rem, 5vw, 2.5rem);
+            color: #ffffff; font-size: clamp(1.8rem, 5vw, 2.5rem);
             font-weight: 800; max-width: 700px;
             margin: 0 0 20px 0; line-height: 1.3;
             background: linear-gradient(180deg, #ffffff 40%, #94a3b8 100%);
@@ -103,7 +95,7 @@ const NOT_AUTHORIZED_HTML = `<!DOCTYPE html>
 </html>`;
 
 // ============================================
-// 📦 IN-MEMORY STORES (Reset on cold start)
+// 📦 IN-MEMORY STORES
 // ============================================
 const stores = {
     database: new Map(),
@@ -123,12 +115,34 @@ function hashHWID(hwid) {
 }
 
 // ============================================
+// 🌐 HTTP HELPER
+// ============================================
+function httpsGet(url) {
+    return new Promise((resolve, reject) => {
+        https.get(url, { timeout: 15000 }, (res) => {
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => {
+                if (res.statusCode === 200) {
+                    resolve(data);
+                } else {
+                    reject(new Error(`HTTP ${res.statusCode}`));
+                }
+            });
+        }).on('error', reject).on('timeout', () => reject(new Error('Timeout')));
+    });
+}
+
+function httpsGetJSON(url) {
+    return httpsGet(url).then(JSON.parse);
+}
+
+// ============================================
 // 🛡️ HELPERS
 // ============================================
 function getRealIP(req) {
     return req.headers['x-forwarded-for']?.split(',')[0]?.trim() || 
-           req.headers['x-real-ip'] || 
-           'unknown';
+           req.headers['x-real-ip'] || 'unknown';
 }
 
 function isExecutor(req) {
@@ -148,7 +162,6 @@ function isExecutor(req) {
 function checkRateLimit(ip) {
     const now = Date.now();
     
-    // Check temp block
     const blockInfo = stores.tempBlocks.get(ip);
     if (blockInfo && blockInfo.until > now) {
         return { allowed: false, remaining: Math.ceil((blockInfo.until - now) / 1000) };
@@ -158,7 +171,6 @@ function checkRateLimit(ip) {
         stores.failedAttempts.delete(ip);
     }
     
-    // Check rate
     let rateInfo = stores.rateLimits.get(ip);
     
     if (!rateInfo || rateInfo.resetAt < now) {
@@ -212,8 +224,8 @@ async function validateWorkInk(key) {
     }
     
     try {
-        const response = await axios.get(CONFIG.WORKINK_API + encodeURIComponent(key), { timeout: 10000 });
-        const valid = response.data?.valid === true;
+        const data = await httpsGetJSON(CONFIG.WORKINK_API + encodeURIComponent(key));
+        const valid = data?.valid === true;
         stores.workinkCache.set(cacheKey, { valid, time: now });
         return valid;
     } catch (error) {
@@ -232,25 +244,35 @@ async function getScript() {
     }
     
     try {
-        const response = await axios.get(CONFIG.LOADER_SCRIPT_URL, {
-            timeout: 15000,
-            headers: { 'User-Agent': `UltimateHub/${CONFIG.VERSION}` }
-        });
-        
-        stores.scriptCache.content = response.data;
+        const content = await httpsGet(CONFIG.LOADER_SCRIPT_URL);
+        stores.scriptCache.content = content;
         stores.scriptCache.time = now;
-        
-        return stores.scriptCache.content;
+        return content;
     } catch (error) {
-        return stores.scriptCache.content || '-- Script temporarily unavailable';
+        return stores.scriptCache.content || '-- Script temporarily unavailable\n-- Error: ' + error.message;
     }
 }
 
 // ============================================
-// 🌐 MAIN HANDLER
+// 📨 RESPONSE HELPERS
+// ============================================
+function sendJSON(res, data, status = 200) {
+    res.status(status).json(data);
+}
+
+function sendHTML(res, html, status = 200) {
+    res.status(status).setHeader('Content-Type', 'text/html').send(html);
+}
+
+function sendText(res, text, status = 200) {
+    res.status(status).setHeader('Content-Type', 'text/plain; charset=utf-8').send(text);
+}
+
+// ============================================
+// 🌐 MAIN HANDLER (Vercel Serverless Entry)
 // ============================================
 module.exports = async (req, res) => {
-    const path = req.url;
+    const path = req.url || '/';
     const method = req.method;
     const ip = getRealIP(req);
     
@@ -268,88 +290,80 @@ module.exports = async (req, res) => {
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('Cache-Control', 'no-store');
     
-    // ============================================
-    // ROUTE: /health
-    // ============================================
-    if (path === '/health' || path === '/api/health') {
-        return res.status(200).json({
-            status: 'ok',
-            version: CONFIG.VERSION,
-            cache: { script: !!stores.scriptCache.content },
-            keys: stores.database.size,
-            serverless: true
-        });
-    }
-    
-    // ============================================
-    // ROUTE: / (root)
-    // ============================================
-    if (path === '/' || path === '/api') {
-        if (!isExecutor(req)) {
-            res.setHeader('Content-Type', 'text/html');
-            return res.status(401).send(NOT_AUTHORIZED_HTML);
-        }
-        return res.status(200).json({ status: 'online', version: CONFIG.VERSION });
-    }
-    
-    // ============================================
-    // ROUTE: /script (and aliases)
-    // ============================================
-    if (['/script', '/api/script', '/loader', '/load', '/s'].includes(path)) {
-        if (!isExecutor(req)) {
-            res.setHeader('Content-Type', 'text/html');
-            return res.status(401).send(NOT_AUTHORIZED_HTML);
+    try {
+        // ============================================
+        // ROUTE: /health
+        // ============================================
+        if (path === '/health' || path === '/api/health') {
+            return sendJSON(res, {
+                status: 'ok',
+                version: CONFIG.VERSION,
+                cache: { script: !!stores.scriptCache.content },
+                keys: stores.database.size,
+                serverless: true
+            });
         }
         
-        // Rate limit
-        const rateCheck = checkRateLimit(ip);
-        if (!rateCheck.allowed) {
-            if (rateCheck.warning) {
-                return res.status(429).json({ error: 'slow_down', warning: rateCheck.warning });
+        // ============================================
+        // ROUTE: / (root)
+        // ============================================
+        if (path === '/' || path === '/api' || path === '/api/') {
+            if (!isExecutor(req)) {
+                return sendHTML(res, NOT_AUTHORIZED_HTML, 401);
             }
-            return res.status(429).json({ error: 'rate_limited', retryAfter: rateCheck.remaining || 300 });
+            return sendJSON(res, { status: 'online', version: CONFIG.VERSION });
         }
         
-        const script = await getScript();
-        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-        return res.status(200).send(script);
-    }
-    
-    // ============================================
-    // ROUTE: /api/validate
-    // ============================================
-    if (path === '/api/validate' && method === 'POST') {
-        // Rate limit
-        const rateCheck = checkRateLimit(ip);
-        if (!rateCheck.allowed) {
-            return res.status(429).json({ error: 'rate_limited' });
+        // ============================================
+        // ROUTE: /script (and aliases)
+        // ============================================
+        if (['/script', '/api/script', '/loader', '/load', '/s'].includes(path)) {
+            if (!isExecutor(req)) {
+                return sendHTML(res, NOT_AUTHORIZED_HTML, 401);
+            }
+            
+            const rateCheck = checkRateLimit(ip);
+            if (!rateCheck.allowed) {
+                if (rateCheck.warning) {
+                    return sendJSON(res, { error: 'slow_down', warning: rateCheck.warning }, 429);
+                }
+                return sendJSON(res, { error: 'rate_limited', retryAfter: rateCheck.remaining || 300 }, 429);
+            }
+            
+            const script = await getScript();
+            return sendText(res, script);
         }
         
-        try {
+        // ============================================
+        // ROUTE: /api/validate
+        // ============================================
+        if (path === '/api/validate' && method === 'POST') {
+            const rateCheck = checkRateLimit(ip);
+            if (!rateCheck.allowed) {
+                return sendJSON(res, { error: 'rate_limited' }, 429);
+            }
+            
             const { key, hwid, userId, userName } = req.body || {};
             
             if (!validateKey(key)) {
-                return res.status(200).json({ valid: false, error: 'invalid_key_format' });
+                return sendJSON(res, { valid: false, error: 'invalid_key_format' });
             }
             
             if (!validateHWID(hwid)) {
-                return res.status(200).json({ valid: false, error: 'invalid_hwid' });
+                return sendJSON(res, { valid: false, error: 'invalid_hwid' });
             }
             
-            // Validate with Work.ink
             const isValidKey = await validateWorkInk(key);
             
             if (isValidKey === null) {
-                return res.status(200).json({ valid: false, error: 'validation_failed' });
+                return sendJSON(res, { valid: false, error: 'validation_failed' });
             }
             
             if (!isValidKey) {
-                // Delete from database if exists
                 if (stores.database.has(key)) {
                     stores.database.delete(key);
                 }
                 
-                // Track failed attempts
                 const attempts = (stores.failedAttempts.get(ip) || 0) + 1;
                 stores.failedAttempts.set(ip, attempts);
                 
@@ -357,10 +371,9 @@ module.exports = async (req, res) => {
                     stores.tempBlocks.set(ip, { until: Date.now() + CONFIG.BLOCK_DURATION });
                 }
                 
-                return res.status(200).json({ valid: false, error: 'invalid_key' });
+                return sendJSON(res, { valid: false, error: 'invalid_key' });
             }
             
-            // Valid key
             stores.failedAttempts.delete(ip);
             stores.warnings.delete(ip);
             
@@ -369,26 +382,24 @@ module.exports = async (req, res) => {
             
             if (existing) {
                 if (existing.hwid !== hashedHWID) {
-                    return res.status(200).json({
+                    return sendJSON(res, {
                         valid: false,
                         error: 'bound_to_other',
                         boundUser: existing.userName
                     });
                 }
                 
-                // Update usage
                 existing.lastUsed = Date.now();
                 existing.useCount = (existing.useCount || 0) + 1;
                 stores.database.set(key, existing);
                 
-                return res.status(200).json({
+                return sendJSON(res, {
                     valid: true,
                     returning: true,
                     userName: existing.userName
                 });
             }
             
-            // New binding
             stores.database.set(key, {
                 hwid: hashedHWID,
                 userId: sanitize(String(userId || ''), 20),
@@ -399,19 +410,19 @@ module.exports = async (req, res) => {
                 boundIP: ip
             });
             
-            return res.status(200).json({ valid: true, newBinding: true });
-            
-        } catch (error) {
-            return res.status(200).json({ valid: false, error: 'server_error' });
+            return sendJSON(res, { valid: true, newBinding: true });
         }
+        
+        // ============================================
+        // 404
+        // ============================================
+        if (!isExecutor(req)) {
+            return sendHTML(res, NOT_AUTHORIZED_HTML, 404);
+        }
+        return sendJSON(res, { error: 'not_found' }, 404);
+        
+    } catch (error) {
+        console.error('Error:', error);
+        return sendJSON(res, { error: 'server_error', message: error.message }, 500);
     }
-    
-    // ============================================
-    // 404
-    // ============================================
-    if (!isExecutor(req)) {
-        res.setHeader('Content-Type', 'text/html');
-        return res.status(404).send(NOT_AUTHORIZED_HTML);
-    }
-    return res.status(404).json({ error: 'not_found' });
 };
