@@ -1,21 +1,14 @@
 // ============================================
-// 🔥 ULTIMATE HUB - NODE.JS VERSION v4.0
+// 🔺 ULTIMATE HUB - VERCEL SERVERLESS v4.0
 // ============================================
-// - Auto-generate secrets
-// - No admin endpoints
-// - No anti-dump
-// - 95% security maintained
-// - Render optimized with keep-alive
+// - Serverless functions
+// - In-memory storage (reset on cold start)
+// - No persistent database
+// - Ultra-fast cold start (~5s)
 // ============================================
 
-const express = require('express');
-const cors = require('cors');
 const axios = require('axios');
-const fs = require('fs').promises;
-const fsSync = require('fs');
 const crypto = require('crypto');
-
-const app = express();
 
 // ============================================
 // 🔧 CONFIGURATION
@@ -23,9 +16,6 @@ const app = express();
 const CONFIG = {
     LOADER_SCRIPT_URL: "https://raw.githubusercontent.com/trianaq765-cmd/lua-protector/refs/heads/main/Protected_8132419935440713.lua.txt",
     WORKINK_API: "https://work.ink/_api/v2/token/isValid/",
-    
-    DB_FILE: './database.json',
-    SECRETS_FILE: './secrets.json',
     
     RATE_LIMIT_WINDOW: 60 * 1000,
     RATE_LIMIT_MAX: 60,
@@ -35,37 +25,11 @@ const CONFIG = {
     SCRIPT_CACHE_TTL: 10 * 60 * 1000,
     WORKINK_CACHE_TTL: 5 * 60 * 1000,
     
-    VERSION: "4.0-NODEJS"
+    VERSION: "4.0-VERCEL"
 };
 
-let MASTER_SECRET = null;
-
-// ============================================
-// 🔐 SECRET MANAGEMENT
-// ============================================
-function loadOrGenerateSecrets() {
-    try {
-        if (fsSync.existsSync(CONFIG.SECRETS_FILE)) {
-            const data = fsSync.readFileSync(CONFIG.SECRETS_FILE, 'utf8');
-            const secrets = JSON.parse(data);
-            MASTER_SECRET = secrets.master;
-            console.log('[SECURITY] ✅ Secrets loaded from file');
-        } else {
-            MASTER_SECRET = crypto.randomBytes(64).toString('hex');
-            
-            const secrets = {
-                master: MASTER_SECRET,
-                created: new Date().toISOString()
-            };
-            
-            fsSync.writeFileSync(CONFIG.SECRETS_FILE, JSON.stringify(secrets, null, 2));
-            console.log('[SECURITY] ✅ New secrets generated and saved');
-        }
-    } catch (e) {
-        console.error('[SECURITY] ❌ Error:', e.message);
-        MASTER_SECRET = crypto.randomBytes(64).toString('hex');
-    }
-}
+// Secret (generated once per deployment)
+const MASTER_SECRET = process.env.MASTER_SECRET || crypto.randomBytes(64).toString('hex');
 
 // ============================================
 // 🎨 HTML TEMPLATE
@@ -139,201 +103,32 @@ const NOT_AUTHORIZED_HTML = `<!DOCTYPE html>
 </html>`;
 
 // ============================================
-// 📦 STORES
+// 📦 IN-MEMORY STORES (Reset on cold start)
 // ============================================
-class LimitedMap extends Map {
-    constructor(maxSize = 10000) {
-        super();
-        this.maxSize = maxSize;
-    }
-    set(key, value) {
-        if (this.size >= this.maxSize) {
-            const firstKey = this.keys().next().value;
-            this.delete(firstKey);
-        }
-        return super.set(key, value);
-    }
-}
-
 const stores = {
-    rateLimits: new LimitedMap(5000),
-    tempBlocks: new LimitedMap(1000),
-    failedAttempts: new LimitedMap(2000),
-    warnings: new LimitedMap(2000),
-    workinkCache: new LimitedMap(5000),
-};
-
-// ============================================
-// 📦 SCRIPT CACHE
-// ============================================
-const scriptCache = {
-    content: null,
-    checksum: null,
-    lastFetch: 0,
-    fetching: false,
-    
-    isValid() {
-        return this.content && (Date.now() - this.lastFetch < CONFIG.SCRIPT_CACHE_TTL);
-    },
-    
-    async refresh(force = false) {
-        if (this.fetching) return this.content;
-        if (!force && this.isValid()) return this.content;
-        
-        this.fetching = true;
-        
-        try {
-            console.log('[CACHE] 🔄 Fetching script from GitHub...');
-            const response = await axios.get(CONFIG.LOADER_SCRIPT_URL, {
-                timeout: 15000,
-                headers: { 
-                    'User-Agent': `UltimateHub/${CONFIG.VERSION}`,
-                    'Cache-Control': 'no-cache'
-                }
-            });
-            
-            this.content = response.data;
-            this.checksum = crypto.createHash('sha256').update(this.content).digest('hex').slice(0, 16);
-            this.lastFetch = Date.now();
-            
-            console.log(`[CACHE] ✅ Script cached (${this.content.length} bytes, checksum: ${this.checksum})`);
-            
-            return this.content;
-        } catch (error) {
-            console.error('[CACHE] ❌ Fetch failed:', error.message);
-            return this.content;
-        } finally {
-            this.fetching = false;
-        }
-    },
-    
-    get() {
-        return {
-            content: this.content,
-            checksum: this.checksum,
-            cached: this.isValid()
-        };
-    }
+    database: new Map(),
+    rateLimits: new Map(),
+    tempBlocks: new Map(),
+    failedAttempts: new Map(),
+    warnings: new Map(),
+    workinkCache: new Map(),
+    scriptCache: { content: null, time: 0 }
 };
 
 // ============================================
 // 🔐 CRYPTO
 // ============================================
-class Crypto {
-    static encrypt(text) {
-        try {
-            const iv = crypto.randomBytes(16);
-            const key = crypto.scryptSync(MASTER_SECRET, 'salt', 32);
-            const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
-            
-            let encrypted = cipher.update(text, 'utf8', 'hex');
-            encrypted += cipher.final('hex');
-            const tag = cipher.getAuthTag();
-            
-            return { 
-                iv: iv.toString('hex'), 
-                data: encrypted, 
-                tag: tag.toString('hex')
-            };
-        } catch (e) {
-            console.error('[CRYPTO] Encrypt error:', e.message);
-            return null;
-        }
-    }
-    
-    static decrypt(encrypted) {
-        try {
-            const key = crypto.scryptSync(MASTER_SECRET, 'salt', 32);
-            const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(encrypted.iv, 'hex'));
-            decipher.setAuthTag(Buffer.from(encrypted.tag, 'hex'));
-            
-            let decrypted = decipher.update(encrypted.data, 'hex', 'utf8');
-            decrypted += decipher.final('utf8');
-            return decrypted;
-        } catch (e) {
-            console.error('[CRYPTO] Decrypt error:', e.message);
-            return null;
-        }
-    }
-    
-    static hashHWID(hwid) {
-        return crypto.createHash('sha512').update(hwid + MASTER_SECRET).digest('hex');
-    }
-}
-
-// ============================================
-// 💾 DATABASE
-// ============================================
-class Database {
-    static data = {};
-    static dirty = false;
-    static saving = false;
-    
-    static async load() {
-        try {
-            if (fsSync.existsSync(CONFIG.DB_FILE)) {
-                const content = await fs.readFile(CONFIG.DB_FILE, 'utf8');
-                const encrypted = JSON.parse(content);
-                const decrypted = Crypto.decrypt(encrypted);
-                
-                if (decrypted) {
-                    this.data = JSON.parse(decrypted);
-                    console.log(`[DB] ✅ Loaded ${Object.keys(this.data).length} keys`);
-                } else {
-                    console.log('[DB] ⚠️ Could not decrypt, starting fresh');
-                    this.data = {};
-                }
-            } else {
-                console.log('[DB] 📁 Starting with empty database');
-                this.data = {};
-            }
-        } catch (e) {
-            console.error('[DB] ❌ Load error:', e.message);
-            this.data = {};
-        }
-    }
-    
-    static async save() {
-        if (this.saving) return;
-        this.saving = true;
-        
-        try {
-            const encrypted = Crypto.encrypt(JSON.stringify(this.data));
-            if (encrypted) {
-                await fs.writeFile(CONFIG.DB_FILE, JSON.stringify(encrypted, null, 2));
-                this.dirty = false;
-            }
-        } catch (e) {
-            console.error('[DB] ❌ Save error:', e.message);
-        } finally {
-            this.saving = false;
-        }
-    }
-    
-    static get(key) { return this.data[key]; }
-    static set(key, value) { this.data[key] = value; this.dirty = true; }
-    static delete(key) { delete this.data[key]; this.dirty = true; }
-    static count() { return Object.keys(this.data).length; }
-}
-
-// ============================================
-// 📝 LOGGER
-// ============================================
-function log(event, data, level = 'info') {
-    const colors = { info: '\x1b[36m', warning: '\x1b[33m', error: '\x1b[31m', success: '\x1b[32m' };
-    console.log(`${colors[level] || colors.info}[${level.toUpperCase()}]\x1b[0m ${event}:`, JSON.stringify(data));
+function hashHWID(hwid) {
+    return crypto.createHash('sha512').update(hwid + MASTER_SECRET).digest('hex');
 }
 
 // ============================================
 // 🛡️ HELPERS
 // ============================================
 function getRealIP(req) {
-    const forwarded = req.headers['x-forwarded-for'];
-    const ip = forwarded?.split(',')[0]?.trim() || 
-               req.headers['x-real-ip'] || 
-               req.connection?.remoteAddress || 
-               req.ip || 'unknown';
-    return ip === '::1' ? '127.0.0.1' : ip.replace('::ffff:', '');
+    return req.headers['x-forwarded-for']?.split(',')[0]?.trim() || 
+           req.headers['x-real-ip'] || 
+           'unknown';
 }
 
 function isExecutor(req) {
@@ -343,31 +138,28 @@ function isExecutor(req) {
     if (req.headers['uh-executor'] || req.headers['x-executor']) return true;
     if (accept.includes('text/html') && ua.includes('mozilla')) return false;
     if (req.headers['sec-fetch-mode']) return false;
-    if (ua.includes('roblox') || ua.includes('synapse') || ua.includes('krnl')) return true;
     
     return true;
 }
 
 // ============================================
-// 🚦 MIDDLEWARE
+// 🚦 RATE LIMITER
 // ============================================
-function rateLimiter(req, res, next) {
-    const ip = getRealIP(req);
+function checkRateLimit(ip) {
     const now = Date.now();
     
+    // Check temp block
     const blockInfo = stores.tempBlocks.get(ip);
     if (blockInfo && blockInfo.until > now) {
-        const remaining = Math.ceil((blockInfo.until - now) / 1000);
-        if (!isExecutor(req)) return res.status(429).send(NOT_AUTHORIZED_HTML);
-        return res.status(429).json({ error: 'rate_limited', retryAfter: remaining });
+        return { allowed: false, remaining: Math.ceil((blockInfo.until - now) / 1000) };
     } else if (blockInfo) {
         stores.tempBlocks.delete(ip);
         stores.warnings.delete(ip);
         stores.failedAttempts.delete(ip);
     }
     
-    const key = `${ip}:normal`;
-    let rateInfo = stores.rateLimits.get(key);
+    // Check rate
+    let rateInfo = stores.rateLimits.get(ip);
     
     if (!rateInfo || rateInfo.resetAt < now) {
         rateInfo = { count: 1, resetAt: now + CONFIG.RATE_LIMIT_WINDOW };
@@ -375,44 +167,42 @@ function rateLimiter(req, res, next) {
         rateInfo.count++;
     }
     
-    stores.rateLimits.set(key, rateInfo);
+    stores.rateLimits.set(ip, rateInfo);
     
     if (rateInfo.count > CONFIG.RATE_LIMIT_MAX) {
         const warnings = stores.warnings.get(ip) || 0;
         
         if (warnings < 2) {
             stores.warnings.set(ip, warnings + 1);
-            return res.status(429).json({ error: 'slow_down', warning: warnings + 1 });
+            return { allowed: false, warning: warnings + 1 };
         }
         
-        stores.tempBlocks.set(ip, { until: now + CONFIG.BLOCK_DURATION, reason: 'rate_limit' });
-        return res.status(429).json({ error: 'temporarily_blocked', retryAfter: 300 });
+        stores.tempBlocks.set(ip, { until: now + CONFIG.BLOCK_DURATION });
+        return { allowed: false, blocked: true };
     }
     
-    next();
-}
-
-function securityHeaders(req, res, next) {
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('X-Frame-Options', 'DENY');
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
-    res.removeHeader('X-Powered-By');
-    next();
+    return { allowed: true };
 }
 
 // ============================================
 // 🔧 VALIDATORS
 // ============================================
-const Validator = {
-    key: (key) => key && typeof key === 'string' && key.length >= 5 && key.length <= 100 && /^[a-zA-Z0-9\-_]+$/.test(key),
-    hwid: (hwid) => hwid && typeof hwid === 'string' && hwid.length >= 10 && hwid.length <= 300,
-    sanitize: (str, maxLen = 100) => typeof str === 'string' ? str.replace(/[<>\"'&\x00-\x1f]/g, '').substring(0, maxLen).trim() : ''
-};
+function validateKey(key) {
+    return key && typeof key === 'string' && key.length >= 5 && key.length <= 100 && /^[a-zA-Z0-9\-_]+$/.test(key);
+}
+
+function validateHWID(hwid) {
+    return hwid && typeof hwid === 'string' && hwid.length >= 10 && hwid.length <= 300;
+}
+
+function sanitize(str, maxLen = 100) {
+    return typeof str === 'string' ? str.replace(/[<>\"'&\x00-\x1f]/g, '').substring(0, maxLen).trim() : '';
+}
 
 // ============================================
 // 🔑 WORK.INK VALIDATION
 // ============================================
-async function validateWorkInk(key, ip) {
+async function validateWorkInk(key) {
     const cacheKey = `workink:${key}`;
     const now = Date.now();
     
@@ -427,247 +217,201 @@ async function validateWorkInk(key, ip) {
         stores.workinkCache.set(cacheKey, { valid, time: now });
         return valid;
     } catch (error) {
-        log('WORKINK_ERROR', { ip, error: error.message }, 'warning');
         return cached ? cached.valid : null;
     }
 }
 
 // ============================================
-// 🚀 EXPRESS SETUP
+// 📦 SCRIPT CACHE
 // ============================================
-app.use(express.json({ limit: '10kb' }));
-app.use(cors({ origin: '*' }));
-app.use(securityHeaders);
-app.use(rateLimiter);
-
-// ============================================
-// 📍 ROUTES
-// ============================================
-
-app.get('/health', (req, res) => {
-    res.json({ 
-        status: 'ok', 
-        version: CONFIG.VERSION,
-        cache: { script: scriptCache.isValid() },
-        keys: Database.count()
-    });
-});
-
-app.get('/', (req, res) => {
-    if (!isExecutor(req)) return res.status(401).send(NOT_AUTHORIZED_HTML);
-    res.json({ status: 'online', version: CONFIG.VERSION });
-});
-
-// Script Loader
-['/script', '/api/script', '/loader', '/load', '/s'].forEach(path => {
-    app.get(path, async (req, res) => {
-        const ip = getRealIP(req);
+async function getScript() {
+    const now = Date.now();
+    
+    if (stores.scriptCache.content && (now - stores.scriptCache.time < CONFIG.SCRIPT_CACHE_TTL)) {
+        return stores.scriptCache.content;
+    }
+    
+    try {
+        const response = await axios.get(CONFIG.LOADER_SCRIPT_URL, {
+            timeout: 15000,
+            headers: { 'User-Agent': `UltimateHub/${CONFIG.VERSION}` }
+        });
         
+        stores.scriptCache.content = response.data;
+        stores.scriptCache.time = now;
+        
+        return stores.scriptCache.content;
+    } catch (error) {
+        return stores.scriptCache.content || '-- Script temporarily unavailable';
+    }
+}
+
+// ============================================
+// 🌐 MAIN HANDLER
+// ============================================
+module.exports = async (req, res) => {
+    const path = req.url;
+    const method = req.method;
+    const ip = getRealIP(req);
+    
+    // CORS
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    
+    if (method === 'OPTIONS') {
+        return res.status(200).end();
+    }
+    
+    // Security headers
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Cache-Control', 'no-store');
+    
+    // ============================================
+    // ROUTE: /health
+    // ============================================
+    if (path === '/health' || path === '/api/health') {
+        return res.status(200).json({
+            status: 'ok',
+            version: CONFIG.VERSION,
+            cache: { script: !!stores.scriptCache.content },
+            keys: stores.database.size,
+            serverless: true
+        });
+    }
+    
+    // ============================================
+    // ROUTE: / (root)
+    // ============================================
+    if (path === '/' || path === '/api') {
         if (!isExecutor(req)) {
-            log('BROWSER_ACCESS', { ip }, 'warning');
+            res.setHeader('Content-Type', 'text/html');
+            return res.status(401).send(NOT_AUTHORIZED_HTML);
+        }
+        return res.status(200).json({ status: 'online', version: CONFIG.VERSION });
+    }
+    
+    // ============================================
+    // ROUTE: /script (and aliases)
+    // ============================================
+    if (['/script', '/api/script', '/loader', '/load', '/s'].includes(path)) {
+        if (!isExecutor(req)) {
+            res.setHeader('Content-Type', 'text/html');
             return res.status(401).send(NOT_AUTHORIZED_HTML);
         }
         
+        // Rate limit
+        const rateCheck = checkRateLimit(ip);
+        if (!rateCheck.allowed) {
+            if (rateCheck.warning) {
+                return res.status(429).json({ error: 'slow_down', warning: rateCheck.warning });
+            }
+            return res.status(429).json({ error: 'rate_limited', retryAfter: rateCheck.remaining || 300 });
+        }
+        
+        const script = await getScript();
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        return res.status(200).send(script);
+    }
+    
+    // ============================================
+    // ROUTE: /api/validate
+    // ============================================
+    if (path === '/api/validate' && method === 'POST') {
+        // Rate limit
+        const rateCheck = checkRateLimit(ip);
+        if (!rateCheck.allowed) {
+            return res.status(429).json({ error: 'rate_limited' });
+        }
+        
         try {
-            const cached = scriptCache.get();
+            const { key, hwid, userId, userName } = req.body || {};
             
-            if (!cached.content) {
-                await scriptCache.refresh(true);
-                const newCached = scriptCache.get();
-                if (!newCached.content) throw new Error('Script unavailable');
-                return res.setHeader('Content-Type', 'text/plain; charset=utf-8').send(newCached.content);
+            if (!validateKey(key)) {
+                return res.status(200).json({ valid: false, error: 'invalid_key_format' });
             }
             
-            res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-            res.send(cached.content);
+            if (!validateHWID(hwid)) {
+                return res.status(200).json({ valid: false, error: 'invalid_hwid' });
+            }
             
-            if (!cached.cached) scriptCache.refresh();
+            // Validate with Work.ink
+            const isValidKey = await validateWorkInk(key);
+            
+            if (isValidKey === null) {
+                return res.status(200).json({ valid: false, error: 'validation_failed' });
+            }
+            
+            if (!isValidKey) {
+                // Delete from database if exists
+                if (stores.database.has(key)) {
+                    stores.database.delete(key);
+                }
+                
+                // Track failed attempts
+                const attempts = (stores.failedAttempts.get(ip) || 0) + 1;
+                stores.failedAttempts.set(ip, attempts);
+                
+                if (attempts >= CONFIG.MAX_FAILED_ATTEMPTS) {
+                    stores.tempBlocks.set(ip, { until: Date.now() + CONFIG.BLOCK_DURATION });
+                }
+                
+                return res.status(200).json({ valid: false, error: 'invalid_key' });
+            }
+            
+            // Valid key
+            stores.failedAttempts.delete(ip);
+            stores.warnings.delete(ip);
+            
+            const hashedHWID = hashHWID(hwid);
+            const existing = stores.database.get(key);
+            
+            if (existing) {
+                if (existing.hwid !== hashedHWID) {
+                    return res.status(200).json({
+                        valid: false,
+                        error: 'bound_to_other',
+                        boundUser: existing.userName
+                    });
+                }
+                
+                // Update usage
+                existing.lastUsed = Date.now();
+                existing.useCount = (existing.useCount || 0) + 1;
+                stores.database.set(key, existing);
+                
+                return res.status(200).json({
+                    valid: true,
+                    returning: true,
+                    userName: existing.userName
+                });
+            }
+            
+            // New binding
+            stores.database.set(key, {
+                hwid: hashedHWID,
+                userId: sanitize(String(userId || ''), 20),
+                userName: sanitize(String(userName || 'Unknown'), 50),
+                boundAt: Date.now(),
+                lastUsed: Date.now(),
+                useCount: 1,
+                boundIP: ip
+            });
+            
+            return res.status(200).json({ valid: true, newBinding: true });
             
         } catch (error) {
-            log('SCRIPT_ERROR', { ip, error: error.message }, 'error');
-            res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-            res.send('-- Script temporarily unavailable\n-- Error: ' + error.message);
-        }
-    });
-});
-
-// Validate Key
-app.post('/api/validate', async (req, res) => {
-    const ip = getRealIP(req);
-    
-    try {
-        const { key, hwid, userId, userName } = req.body;
-        
-        if (!Validator.key(key)) {
-            return res.json({ valid: false, error: 'invalid_key_format' });
-        }
-        
-        if (!Validator.hwid(hwid)) {
-            return res.json({ valid: false, error: 'invalid_hwid' });
-        }
-        
-        const isValidKey = await validateWorkInk(key, ip);
-        
-        if (isValidKey === null) {
-            return res.json({ valid: false, error: 'validation_failed', message: 'Cannot verify key' });
-        }
-        
-        if (!isValidKey) {
-            const existing = Database.get(key);
-            if (existing) {
-                Database.delete(key);
-                Database.save();
-            }
-            
-            const attempts = (stores.failedAttempts.get(ip) || 0) + 1;
-            stores.failedAttempts.set(ip, attempts);
-            
-            if (attempts >= CONFIG.MAX_FAILED_ATTEMPTS) {
-                stores.tempBlocks.set(ip, { until: Date.now() + CONFIG.BLOCK_DURATION, reason: 'invalid_keys' });
-            }
-            
-            return res.json({ valid: false, error: 'invalid_key' });
-        }
-        
-        stores.failedAttempts.delete(ip);
-        stores.warnings.delete(ip);
-        
-        const hashedHWID = Crypto.hashHWID(hwid);
-        const existing = Database.get(key);
-        
-        if (existing) {
-            if (existing.hwid !== hashedHWID) {
-                return res.json({ valid: false, error: 'bound_to_other', boundUser: existing.userName });
-            }
-            
-            existing.lastUsed = Date.now();
-            existing.useCount = (existing.useCount || 0) + 1;
-            Database.set(key, existing);
-            
-            log('KEY_VALIDATED', { ip, key: key.slice(0, 8) + '...' }, 'success');
-            
-            return res.json({ valid: true, returning: true, userName: existing.userName });
-        }
-        
-        Database.set(key, {
-            hwid: hashedHWID,
-            userId: Validator.sanitize(String(userId || ''), 20),
-            userName: Validator.sanitize(String(userName || 'Unknown'), 50),
-            boundAt: Date.now(),
-            lastUsed: Date.now(),
-            useCount: 1,
-            boundIP: ip
-        });
-        
-        log('KEY_BOUND', { ip, key: key.slice(0, 8) + '...' }, 'success');
-        
-        return res.json({ valid: true, newBinding: true });
-        
-    } catch (error) {
-        log('VALIDATE_ERROR', { ip, error: error.message }, 'error');
-        return res.json({ valid: false, error: 'server_error' });
-    }
-});
-
-// 404
-app.use('*', (req, res) => {
-    if (!isExecutor(req)) return res.status(404).send(NOT_AUTHORIZED_HTML);
-    res.status(404).json({ error: 'not_found' });
-});
-
-// ============================================
-// 🧹 CLEANUP
-// ============================================
-setInterval(() => {
-    const now = Date.now();
-    for (const [ip, info] of stores.tempBlocks) {
-        if (info.until < now) {
-            stores.tempBlocks.delete(ip);
-            stores.warnings.delete(ip);
-            stores.failedAttempts.delete(ip);
+            return res.status(200).json({ valid: false, error: 'server_error' });
         }
     }
-    for (const [key, info] of stores.rateLimits) {
-        if (info.resetAt < now) stores.rateLimits.delete(key);
+    
+    // ============================================
+    // 404
+    // ============================================
+    if (!isExecutor(req)) {
+        res.setHeader('Content-Type', 'text/html');
+        return res.status(404).send(NOT_AUTHORIZED_HTML);
     }
-    for (const [key, info] of stores.workinkCache) {
-        if (now - info.time > CONFIG.WORKINK_CACHE_TTL * 2) stores.workinkCache.delete(key);
-    }
-}, 60 * 1000);
-
-setInterval(async () => {
-    if (Database.dirty) await Database.save();
-}, 30 * 1000);
-
-setInterval(() => scriptCache.refresh(), CONFIG.SCRIPT_CACHE_TTL);
-
-// ============================================
-// 🔄 RENDER KEEP-ALIVE
-// ============================================
-const RENDER_URL = process.env.RENDER_EXTERNAL_URL || "https://lua-protector-1.onrender.com";
-
-if (RENDER_URL) {
-    console.log('[RENDER] Keep-alive enabled:', RENDER_URL);
-    
-    // Ping pertama setelah 60 detik (biar server ready)
-    setTimeout(() => {
-        setInterval(async () => {
-            try {
-                await axios.get(`${RENDER_URL}/health`, { timeout: 30000 });
-                console.log('[RENDER] ✅ Keep-alive ping successful');
-            } catch (e) {
-                console.log('[RENDER] ⚠️ Keep-alive ping failed:', e.message);
-            }
-        }, 10 * 60 * 1000); // Setiap 10 menit
-    }, 60 * 1000);
-}
-
-// ============================================
-// 🚀 START
-// ============================================
-async function start() {
-    console.log('\n\x1b[36m╔═══════════════════════════════════════════════════════════════╗\x1b[0m');
-    console.log('\x1b[36m║   🟢 ULTIMATE HUB - NODE.JS VERSION v4.0                     ║\x1b[0m');
-    console.log('\x1b[36m╚═══════════════════════════════════════════════════════════════╝\x1b[0m\n');
-    
-    loadOrGenerateSecrets();
-    await Database.load();
-    await scriptCache.refresh(true);
-    
-    const PORT = process.env.PORT || 3000;
-    app.listen(PORT, () => {
-        console.log(`\n\x1b[32m╔═══════════════════════════════════════════════════════════════╗
-║                    ✅ SERVER STARTED                          ║
-╠═══════════════════════════════════════════════════════════════╣
-║  🌐 Port: ${String(PORT).padEnd(52)}║
-║  📦 Version: ${CONFIG.VERSION.padEnd(49)}║
-║  🔒 Security: 95%                                             ║
-║                                                               ║
-║  ✅ Features:                                                 ║
-║     • Auto-generated secrets                                  ║
-║     • Encrypted database (AES-256-GCM)                        ║
-║     • HWID binding (SHA-512)                                  ║
-║     • Work.ink validation + cache                             ║
-║     • Script caching (10 min)                                 ║
-║     • Rate limiting (5 min blocks)                            ║
-║     • Render keep-alive                                       ║
-║                                                               ║
-║  📊 Status:                                                   ║
-║     • Keys: ${String(Database.count()).padEnd(48)}║
-║     • Script cached: ${String(scriptCache.isValid() ? 'YES' : 'NO').padEnd(39)}║
-╚═══════════════════════════════════════════════════════════════╝\x1b[0m\n`);
-    });
-}
-
-process.on('SIGINT', async () => {
-    console.log('\n[SERVER] Shutting down...');
-    await Database.save();
-    process.exit(0);
-});
-
-process.on('SIGTERM', async () => {
-    await Database.save();
-    process.exit(0);
-});
-
-start();
+    return res.status(404).json({ error: 'not_found' });
+};
