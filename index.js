@@ -1,5 +1,14 @@
-const https = require('https');
-const crypto = require('crypto');
+// ============================================
+// 🔺 ULTIMATE HUB - VERCEL SERVERLESS v4.0
+// ============================================
+// SAMA PERSIS dengan Render version
+// - Semua fitur keamanan lengkap
+// - HTML Not Authorized tidak berubah
+// - Rate limiting, HWID binding, Work.ink cache
+// ============================================
+
+import https from 'https';
+import crypto from 'crypto';
 
 // ============================================
 // 🔧 CONFIGURATION
@@ -7,19 +16,22 @@ const crypto = require('crypto');
 const CONFIG = {
     LOADER_SCRIPT_URL: "https://raw.githubusercontent.com/trianaq765-cmd/lua-protector/refs/heads/main/Protected_8132419935440713.lua.txt",
     WORKINK_API: "https://work.ink/_api/v2/token/isValid/",
-    RATE_LIMIT_WINDOW: 60000,
+    
+    RATE_LIMIT_WINDOW: 60 * 1000,
     RATE_LIMIT_MAX: 60,
-    BLOCK_DURATION: 300000,
+    BLOCK_DURATION: 5 * 60 * 1000,
     MAX_FAILED_ATTEMPTS: 10,
-    SCRIPT_CACHE_TTL: 600000,
-    WORKINK_CACHE_TTL: 300000,
+    
+    SCRIPT_CACHE_TTL: 10 * 60 * 1000,
+    WORKINK_CACHE_TTL: 5 * 60 * 1000,
+    
     VERSION: "4.0-VERCEL"
 };
 
 const MASTER_SECRET = process.env.MASTER_SECRET || crypto.randomBytes(64).toString('hex');
 
 // ============================================
-// 🎨 HTML TEMPLATE (SAMA PERSIS!)
+// 🎨 HTML TEMPLATE (SAMA PERSIS - TIDAK BERUBAH!)
 // ============================================
 const NOT_AUTHORIZED_HTML = `<!DOCTYPE html>
 <html lang="id">
@@ -119,16 +131,74 @@ const NOT_AUTHORIZED_HTML = `<!DOCTYPE html>
 </html>`;
 
 // ============================================
-// 📦 IN-MEMORY STORES
+// 📦 IN-MEMORY STORES (SAMA SEPERTI RENDER)
 // ============================================
+class LimitedMap extends Map {
+    constructor(maxSize = 10000) {
+        super();
+        this.maxSize = maxSize;
+    }
+    set(key, value) {
+        if (this.size >= this.maxSize) {
+            const firstKey = this.keys().next().value;
+            this.delete(firstKey);
+        }
+        return super.set(key, value);
+    }
+}
+
 const stores = {
-    database: new Map(),
-    rateLimits: new Map(),
-    tempBlocks: new Map(),
-    failedAttempts: new Map(),
-    warnings: new Map(),
-    workinkCache: new Map(),
-    scriptCache: { content: null, time: 0 }
+    database: new LimitedMap(5000),
+    rateLimits: new LimitedMap(5000),
+    tempBlocks: new LimitedMap(1000),
+    failedAttempts: new LimitedMap(2000),
+    warnings: new LimitedMap(2000),
+    workinkCache: new LimitedMap(5000),
+};
+
+// Script Cache
+const scriptCache = {
+    content: null,
+    checksum: null,
+    lastFetch: 0,
+    fetching: false,
+    
+    isValid() {
+        return this.content && (Date.now() - this.lastFetch < CONFIG.SCRIPT_CACHE_TTL);
+    },
+    
+    async refresh(force = false) {
+        if (this.fetching) return this.content;
+        if (!force && this.isValid()) return this.content;
+        
+        this.fetching = true;
+        
+        try {
+            console.log('[CACHE] 🔄 Fetching script from GitHub...');
+            const content = await httpsGet(CONFIG.LOADER_SCRIPT_URL);
+            
+            this.content = content;
+            this.checksum = crypto.createHash('sha256').update(content).digest('hex').slice(0, 16);
+            this.lastFetch = Date.now();
+            
+            console.log(`[CACHE] ✅ Script cached (${content.length} bytes, checksum: ${this.checksum})`);
+            
+            return this.content;
+        } catch (error) {
+            console.error('[CACHE] ❌ Fetch failed:', error.message);
+            return this.content;
+        } finally {
+            this.fetching = false;
+        }
+    },
+    
+    get() {
+        return {
+            content: this.content,
+            checksum: this.checksum,
+            cached: this.isValid()
+        };
+    }
 };
 
 // ============================================
@@ -136,268 +206,411 @@ const stores = {
 // ============================================
 function httpsGet(url) {
     return new Promise((resolve, reject) => {
-        https.get(url, { timeout: 15000 }, (res) => {
+        const req = https.get(url, { timeout: 15000 }, (res) => {
             let data = '';
             res.on('data', chunk => data += chunk);
             res.on('end', () => {
-                if (res.statusCode === 200) resolve(data);
-                else reject(new Error('HTTP ' + res.statusCode));
+                if (res.statusCode === 200) {
+                    resolve(data);
+                } else {
+                    reject(new Error(`HTTP ${res.statusCode}`));
+                }
             });
-        }).on('error', reject).on('timeout', () => reject(new Error('Timeout')));
+        });
+        req.on('error', reject);
+        req.on('timeout', () => {
+            req.destroy();
+            reject(new Error('Timeout'));
+        });
     });
 }
 
-// ============================================
-// 🛡️ HELPERS
-// ============================================
-function getRealIP(req) {
-    const fwd = req.headers['x-forwarded-for'];
-    return fwd ? fwd.split(',')[0].trim() : 'unknown';
+function httpsGetJSON(url) {
+    return httpsGet(url).then(data => JSON.parse(data));
 }
 
-function isExecutor(req) {
-    const ua = (req.headers['user-agent'] || '').toLowerCase();
-    const accept = req.headers['accept'] || '';
-    if (accept.includes('text/html') && ua.includes('mozilla')) return false;
-    if (req.headers['sec-fetch-mode']) return false;
-    return true;
-}
-
+// ============================================
+// 🔐 CRYPTO (SAMA SEPERTI RENDER)
+// ============================================
 function hashHWID(hwid) {
     return crypto.createHash('sha512').update(hwid + MASTER_SECRET).digest('hex');
 }
 
 // ============================================
-// 🚦 RATE LIMITER
+// 📝 LOGGER (SAMA SEPERTI RENDER)
+// ============================================
+function log(event, data, level = 'info') {
+    const colors = { info: '\x1b[36m', warning: '\x1b[33m', error: '\x1b[31m', success: '\x1b[32m' };
+    console.log(`${colors[level] || colors.info}[${level.toUpperCase()}]\x1b[0m ${event}:`, JSON.stringify(data));
+}
+
+// ============================================
+// 🛡️ HELPERS (SAMA SEPERTI RENDER)
+// ============================================
+function getRealIP(req) {
+    const forwarded = req.headers['x-forwarded-for'];
+    const ip = forwarded?.split(',')[0]?.trim() || 
+               req.headers['x-real-ip'] || 
+               req.socket?.remoteAddress ||
+               'unknown';
+    return ip === '::1' ? '127.0.0.1' : ip.replace('::ffff:', '');
+}
+
+function isExecutor(req) {
+    const ua = (req.headers['user-agent'] || '').toLowerCase();
+    const accept = req.headers['accept'] || '';
+    
+    if (req.headers['uh-executor'] || req.headers['x-executor']) return true;
+    if (accept.includes('text/html') && ua.includes('mozilla')) return false;
+    if (req.headers['sec-fetch-mode']) return false;
+    if (ua.includes('roblox') || ua.includes('synapse') || ua.includes('krnl')) return true;
+    
+    return true;
+}
+
+// ============================================
+// 🚦 RATE LIMITER (SAMA SEPERTI RENDER)
 // ============================================
 function checkRateLimit(ip) {
     const now = Date.now();
-    const blockInfo = stores.tempBlocks.get(ip);
     
+    // Check temp block
+    const blockInfo = stores.tempBlocks.get(ip);
     if (blockInfo && blockInfo.until > now) {
-        return { allowed: false, remaining: Math.ceil((blockInfo.until - now) / 1000) };
+        const remaining = Math.ceil((blockInfo.until - now) / 1000);
+        return { allowed: false, blocked: true, remaining };
     } else if (blockInfo) {
         stores.tempBlocks.delete(ip);
         stores.warnings.delete(ip);
+        stores.failedAttempts.delete(ip);
     }
     
-    let rateInfo = stores.rateLimits.get(ip);
+    // Check rate
+    const key = `${ip}:normal`;
+    let rateInfo = stores.rateLimits.get(key);
+    
     if (!rateInfo || rateInfo.resetAt < now) {
         rateInfo = { count: 1, resetAt: now + CONFIG.RATE_LIMIT_WINDOW };
     } else {
         rateInfo.count++;
     }
-    stores.rateLimits.set(ip, rateInfo);
+    
+    stores.rateLimits.set(key, rateInfo);
     
     if (rateInfo.count > CONFIG.RATE_LIMIT_MAX) {
         const warnings = stores.warnings.get(ip) || 0;
+        
         if (warnings < 2) {
             stores.warnings.set(ip, warnings + 1);
             return { allowed: false, warning: warnings + 1 };
         }
-        stores.tempBlocks.set(ip, { until: now + CONFIG.BLOCK_DURATION });
-        return { allowed: false, remaining: 300 };
+        
+        stores.tempBlocks.set(ip, { until: now + CONFIG.BLOCK_DURATION, reason: 'rate_limit' });
+        return { allowed: false, blocked: true, remaining: 300 };
     }
+    
     return { allowed: true };
 }
 
 // ============================================
-// 🔧 VALIDATORS
+// 🔧 VALIDATORS (SAMA SEPERTI RENDER)
 // ============================================
-function validateKey(key) {
-    return key && typeof key === 'string' && key.length >= 5 && key.length <= 100 && /^[a-zA-Z0-9\-_]+$/.test(key);
-}
-
-function validateHWID(hwid) {
-    return hwid && typeof hwid === 'string' && hwid.length >= 10 && hwid.length <= 300;
-}
-
-function sanitize(str, maxLen = 100) {
-    return typeof str === 'string' ? str.replace(/[<>\"'&\x00-\x1f]/g, '').substring(0, maxLen).trim() : '';
-}
+const Validator = {
+    key: (key) => key && typeof key === 'string' && key.length >= 5 && key.length <= 100 && /^[a-zA-Z0-9\-_]+$/.test(key),
+    hwid: (hwid) => hwid && typeof hwid === 'string' && hwid.length >= 10 && hwid.length <= 300,
+    sanitize: (str, maxLen = 100) => typeof str === 'string' ? str.replace(/[<>\"'&\x00-\x1f]/g, '').substring(0, maxLen).trim() : ''
+};
 
 // ============================================
-// 🔑 WORK.INK VALIDATION
+// 🔑 WORK.INK VALIDATION (SAMA SEPERTI RENDER)
 // ============================================
-async function validateWorkInk(key) {
-    const cacheKey = 'wk:' + key;
+async function validateWorkInk(key, ip) {
+    const cacheKey = `workink:${key}`;
     const now = Date.now();
-    const cached = stores.workinkCache.get(cacheKey);
     
+    const cached = stores.workinkCache.get(cacheKey);
     if (cached && (now - cached.time < CONFIG.WORKINK_CACHE_TTL)) {
         return cached.valid;
     }
     
     try {
-        const data = await httpsGet(CONFIG.WORKINK_API + encodeURIComponent(key));
-        const json = JSON.parse(data);
-        const valid = json.valid === true;
+        const data = await httpsGetJSON(CONFIG.WORKINK_API + encodeURIComponent(key));
+        const valid = data?.valid === true;
         stores.workinkCache.set(cacheKey, { valid, time: now });
         return valid;
-    } catch (e) {
+    } catch (error) {
+        log('WORKINK_ERROR', { ip, error: error.message }, 'warning');
         return cached ? cached.valid : null;
     }
 }
 
 // ============================================
-// 📦 SCRIPT CACHE
+// 📨 RESPONSE HELPERS
 // ============================================
-async function getScript() {
-    const now = Date.now();
-    if (stores.scriptCache.content && (now - stores.scriptCache.time < CONFIG.SCRIPT_CACHE_TTL)) {
-        return stores.scriptCache.content;
+function sendJSON(res, data, status = 200) {
+    res.setHeader('Content-Type', 'application/json');
+    res.status(status).end(JSON.stringify(data));
+}
+
+function sendHTML(res, html, status = 200) {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.status(status).end(html);
+}
+
+function sendText(res, text, status = 200) {
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.status(status).end(text);
+}
+
+// ============================================
+// 📍 ROUTE HANDLERS (SAMA SEPERTI RENDER)
+// ============================================
+
+// Health Check
+async function handleHealth(req, res) {
+    return sendJSON(res, {
+        status: 'ok',
+        version: CONFIG.VERSION,
+        cache: { script: scriptCache.isValid() },
+        keys: stores.database.size,
+        serverless: true
+    });
+}
+
+// Root
+async function handleRoot(req, res) {
+    if (!isExecutor(req)) {
+        return sendHTML(res, NOT_AUTHORIZED_HTML, 401);
     }
+    return sendJSON(res, { status: 'online', version: CONFIG.VERSION });
+}
+
+// Script Loader
+async function handleScript(req, res, ip) {
+    if (!isExecutor(req)) {
+        log('BROWSER_ACCESS', { ip }, 'warning');
+        return sendHTML(res, NOT_AUTHORIZED_HTML, 401);
+    }
+    
+    // Rate limit
+    const rateCheck = checkRateLimit(ip);
+    if (!rateCheck.allowed) {
+        if (rateCheck.warning) {
+            return sendJSON(res, { error: 'slow_down', warning: rateCheck.warning }, 429);
+        }
+        return sendJSON(res, { error: 'rate_limited', retryAfter: rateCheck.remaining || 300 }, 429);
+    }
+    
     try {
-        const content = await httpsGet(CONFIG.LOADER_SCRIPT_URL);
-        stores.scriptCache.content = content;
-        stores.scriptCache.time = now;
-        return content;
-    } catch (e) {
-        return stores.scriptCache.content || '-- Script temporarily unavailable';
+        let cached = scriptCache.get();
+        
+        if (!cached.content) {
+            await scriptCache.refresh(true);
+            cached = scriptCache.get();
+            if (!cached.content) {
+                throw new Error('Script unavailable');
+            }
+        }
+        
+        // Refresh in background if stale
+        if (!cached.cached) {
+            scriptCache.refresh();
+        }
+        
+        res.setHeader('X-Checksum', cached.checksum || 'none');
+        res.setHeader('Cache-Control', 'no-store');
+        return sendText(res, cached.content);
+        
+    } catch (error) {
+        log('SCRIPT_ERROR', { ip, error: error.message }, 'error');
+        return sendText(res, '-- Script temporarily unavailable\n-- Error: ' + error.message);
+    }
+}
+
+// Validate Key
+async function handleValidate(req, res, ip) {
+    // Rate limit
+    const rateCheck = checkRateLimit(ip);
+    if (!rateCheck.allowed) {
+        return sendJSON(res, { error: 'rate_limited' }, 429);
+    }
+    
+    try {
+        const { key, hwid, userId, userName } = req.body || {};
+        
+        if (!Validator.key(key)) {
+            return sendJSON(res, { valid: false, error: 'invalid_key_format' });
+        }
+        
+        if (!Validator.hwid(hwid)) {
+            return sendJSON(res, { valid: false, error: 'invalid_hwid' });
+        }
+        
+        // Validate with Work.ink
+        const isValidKey = await validateWorkInk(key, ip);
+        
+        if (isValidKey === null) {
+            return sendJSON(res, { valid: false, error: 'validation_failed', message: 'Cannot verify key' });
+        }
+        
+        if (!isValidKey) {
+            if (stores.database.has(key)) {
+                stores.database.delete(key);
+            }
+            
+            const attempts = (stores.failedAttempts.get(ip) || 0) + 1;
+            stores.failedAttempts.set(ip, attempts);
+            
+            if (attempts >= CONFIG.MAX_FAILED_ATTEMPTS) {
+                stores.tempBlocks.set(ip, { until: Date.now() + CONFIG.BLOCK_DURATION, reason: 'invalid_keys' });
+            }
+            
+            return sendJSON(res, { valid: false, error: 'invalid_key' });
+        }
+        
+        // Valid key - reset failed attempts
+        stores.failedAttempts.delete(ip);
+        stores.warnings.delete(ip);
+        
+        const hashedHWID = hashHWID(hwid);
+        const existing = stores.database.get(key);
+        
+        if (existing) {
+            if (existing.hwid !== hashedHWID) {
+                return sendJSON(res, {
+                    valid: false,
+                    error: 'bound_to_other',
+                    boundUser: existing.userName
+                });
+            }
+            
+            // Update usage
+            existing.lastUsed = Date.now();
+            existing.useCount = (existing.useCount || 0) + 1;
+            stores.database.set(key, existing);
+            
+            log('KEY_VALIDATED', { ip, key: key.slice(0, 8) + '...' }, 'success');
+            
+            return sendJSON(res, {
+                valid: true,
+                returning: true,
+                userName: existing.userName
+            });
+        }
+        
+        // New binding
+        stores.database.set(key, {
+            hwid: hashedHWID,
+            userId: Validator.sanitize(String(userId || ''), 20),
+            userName: Validator.sanitize(String(userName || 'Unknown'), 50),
+            boundAt: Date.now(),
+            lastUsed: Date.now(),
+            useCount: 1,
+            boundIP: ip
+        });
+        
+        log('KEY_BOUND', { ip, key: key.slice(0, 8) + '...' }, 'success');
+        
+        return sendJSON(res, { valid: true, newBinding: true });
+        
+    } catch (error) {
+        log('VALIDATE_ERROR', { ip, error: error.message }, 'error');
+        return sendJSON(res, { valid: false, error: 'server_error' });
+    }
+}
+
+// 404 Handler
+async function handle404(req, res) {
+    if (!isExecutor(req)) {
+        return sendHTML(res, NOT_AUTHORIZED_HTML, 404);
+    }
+    return sendJSON(res, { error: 'not_found' }, 404);
+}
+
+// ============================================
+// 🌐 MAIN HANDLER (Vercel Entry Point)
+// ============================================
+export default async function handler(req, res) {
+    // Parse URL
+    const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+    const path = url.pathname;
+    const method = req.method;
+    const ip = getRealIP(req);
+    
+    // CORS Headers
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, UH-Executor, X-Executor');
+    
+    if (method === 'OPTIONS') {
+        return res.status(200).end();
+    }
+    
+    // Security Headers
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('X-XSS-Protection', '1; mode=block');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    
+    try {
+        // Route matching
+        if (path === '/health' || path === '/api/health') {
+            return await handleHealth(req, res);
+        }
+        
+        if (path === '/' || path === '/api' || path === '/api/') {
+            return await handleRoot(req, res);
+        }
+        
+        if (['/script', '/api/script', '/loader', '/load', '/s'].includes(path)) {
+            return await handleScript(req, res, ip);
+        }
+        
+        if ((path === '/api/validate' || path === '/validate') && method === 'POST') {
+            return await handleValidate(req, res, ip);
+        }
+        
+        // 404
+        return await handle404(req, res);
+        
+    } catch (error) {
+        console.error('Handler error:', error);
+        return sendJSON(res, { error: 'server_error', message: error.message }, 500);
     }
 }
 
 // ============================================
-// 🌐 MAIN HANDLER
+// 🧹 CLEANUP (Auto-runs periodically)
 // ============================================
-module.exports = async (req, res) => {
-    const path = req.url || '/';
-    const method = req.method;
-    const ip = getRealIP(req);
+setInterval(() => {
+    const now = Date.now();
     
-    // CORS
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-    
-    if (method === 'OPTIONS') {
-        res.status(200).end();
-        return;
-    }
-    
-    // Security headers
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('X-Frame-Options', 'DENY');
-    res.setHeader('Cache-Control', 'no-store');
-    
-    // ============================================
-    // ROUTES
-    // ============================================
-    
-    // /health
-    if (path === '/api' || path === '/api/' || path === '/api/health' || path === '/health') {
-        res.status(200).json({
-            status: 'ok',
-            version: CONFIG.VERSION,
-            cache: { script: !!stores.scriptCache.content },
-            keys: stores.database.size
-        });
-        return;
-    }
-    
-    // /script
-    if (path === '/api/script' || path === '/script' || path === '/s' || path === '/loader' || path === '/load') {
-        if (!isExecutor(req)) {
-            res.setHeader('Content-Type', 'text/html');
-            res.status(401).end(NOT_AUTHORIZED_HTML);
-            return;
-        }
-        
-        const rateCheck = checkRateLimit(ip);
-        if (!rateCheck.allowed) {
-            res.status(429).json({ error: 'rate_limited', retryAfter: rateCheck.remaining || 300 });
-            return;
-        }
-        
-        const script = await getScript();
-        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-        res.status(200).end(script);
-        return;
-    }
-    
-    // /api/validate
-    if ((path === '/api/validate' || path === '/validate') && method === 'POST') {
-        const rateCheck = checkRateLimit(ip);
-        if (!rateCheck.allowed) {
-            res.status(429).json({ error: 'rate_limited' });
-            return;
-        }
-        
-        try {
-            const body = req.body || {};
-            const { key, hwid, userId, userName } = body;
-            
-            if (!validateKey(key)) {
-                res.status(200).json({ valid: false, error: 'invalid_key_format' });
-                return;
-            }
-            
-            if (!validateHWID(hwid)) {
-                res.status(200).json({ valid: false, error: 'invalid_hwid' });
-                return;
-            }
-            
-            const isValidKey = await validateWorkInk(key);
-            
-            if (isValidKey === null) {
-                res.status(200).json({ valid: false, error: 'validation_failed' });
-                return;
-            }
-            
-            if (!isValidKey) {
-                stores.database.delete(key);
-                const attempts = (stores.failedAttempts.get(ip) || 0) + 1;
-                stores.failedAttempts.set(ip, attempts);
-                if (attempts >= CONFIG.MAX_FAILED_ATTEMPTS) {
-                    stores.tempBlocks.set(ip, { until: Date.now() + CONFIG.BLOCK_DURATION });
-                }
-                res.status(200).json({ valid: false, error: 'invalid_key' });
-                return;
-            }
-            
-            stores.failedAttempts.delete(ip);
+    // Clean expired blocks
+    for (const [ip, info] of stores.tempBlocks) {
+        if (info.until < now) {
+            stores.tempBlocks.delete(ip);
             stores.warnings.delete(ip);
-            
-            const hashedHWID = hashHWID(hwid);
-            const existing = stores.database.get(key);
-            
-            if (existing) {
-                if (existing.hwid !== hashedHWID) {
-                    res.status(200).json({ valid: false, error: 'bound_to_other', boundUser: existing.userName });
-                    return;
-                }
-                existing.lastUsed = Date.now();
-                existing.useCount = (existing.useCount || 0) + 1;
-                stores.database.set(key, existing);
-                res.status(200).json({ valid: true, returning: true, userName: existing.userName });
-                return;
-            }
-            
-            stores.database.set(key, {
-                hwid: hashedHWID,
-                userId: sanitize(String(userId || ''), 20),
-                userName: sanitize(String(userName || 'Unknown'), 50),
-                boundAt: Date.now(),
-                lastUsed: Date.now(),
-                useCount: 1,
-                boundIP: ip
-            });
-            
-            res.status(200).json({ valid: true, newBinding: true });
-            return;
-            
-        } catch (e) {
-            res.status(200).json({ valid: false, error: 'server_error' });
-            return;
+            stores.failedAttempts.delete(ip);
         }
     }
     
-    // 404 / Root
-    if (!isExecutor(req)) {
-        res.setHeader('Content-Type', 'text/html');
-        res.status(404).end(NOT_AUTHORIZED_HTML);
-        return;
+    // Clean old rate limits
+    for (const [key, info] of stores.rateLimits) {
+        if (info.resetAt < now) {
+            stores.rateLimits.delete(key);
+        }
     }
     
-    res.status(404).json({ error: 'not_found' });
-};
+    // Clean old workink cache
+    for (const [key, info] of stores.workinkCache) {
+        if (now - info.time > CONFIG.WORKINK_CACHE_TTL * 2) {
+            stores.workinkCache.delete(key);
+        }
+    }
+}, 60 * 1000);
+
+// Pre-cache script on cold start
+scriptCache.refresh(true);
+
+console.log(`[VERCEL] 🔺 Ultimate Hub ${CONFIG.VERSION} initialized`);
