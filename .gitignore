@@ -1,0 +1,15 @@
+# Secrets & Database
+secrets.json
+database.json
+
+# Node
+node_modules/
+npm-debug.log
+package-lock.json
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+.env
