@@ -1,7 +1,6 @@
 {
   "name": "ultimate-hub-vercel",
   "version": "4.0.0",
-  "description": "Ultimate Hub - Vercel Serverless",
-  "main": "api/index.js",
-  "dependencies": {}
+  "private": true,
+  "type": "module"
 }
