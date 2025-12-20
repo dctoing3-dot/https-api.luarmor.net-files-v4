@@ -3,11 +3,5 @@
   "version": "4.0.0",
   "description": "Ultimate Hub - Vercel Serverless",
   "main": "api/index.js",
-  "scripts": {
-    "dev": "vercel dev"
-  },
-  "dependencies": {},
-  "engines": {
-    "node": "18.x"
-  }
+  "dependencies": {}
 }
